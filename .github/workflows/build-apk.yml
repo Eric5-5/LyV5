@@ -87,6 +87,10 @@ jobs:
           echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
           ls /usr/local/lib/android/sdk
+          # 把 sdkmanager 所在目录加入 PATH（runner 镜像版本目录不固定，动态查找）
+          SDKM=$(find /usr/local/lib/android/sdk -name sdkmanager -type f 2>/dev/null | head -1)
+          echo "sdkmanager => $SDKM"
+          echo "$(dirname "$SDKM")" >> "$GITHUB_PATH"
 
       - name: 安装 Android NDK
         run: |
