@@ -1,0 +1,138 @@
+name: Build 挂机新落叶V5 APK
+
+# 用法：
+#   仓库里只需要本文件和 patch_source.py 两个文件。
+#   CI 会拉取上游 mkxp-z-android（固定 commit）→ 打移植补丁 → 交叉编译 → 产出可安装的 debug 签名 APK。
+#   在 Actions 页面点 "Run workflow"，跑完后在本页面底部下载产物 luoye-v5-apk。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build APK (arm64-v8a)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+
+    env:
+      ANDROID_NDK_VERSION: 23.2.8568313
+
+    steps:
+      - name: 取出补丁脚本（本仓库）
+        uses: actions/checkout@v4
+        with:
+          path: builder
+
+      - name: 拉取上游引擎（固定 commit）
+        uses: actions/checkout@v4
+        with:
+          repository: BookerRues9/mkxp-z-android-reworked
+          ref: b668e08cb58edf661d56fd4d396036ac31cd8332
+          path: engine
+
+      - name: 打移植补丁
+        run: |
+          python3 builder/patch_source.py engine
+          echo "--- 校验补丁已生效 ---"
+          # 1) 触摸补丁：丢弃触摸鼠标事件的分支必须消失（ASCII 锚点，补丁前 1 处，补丁后 0 处）
+          if grep -q 'if (event.button.which == SDL_TOUCH_MOUSEID)' engine/app/jni/mkxp-z/src/eventthread.cpp; then
+            echo '!! touch patch missing'; exit 1
+          fi
+          echo '  touch patch: OK'
+          # 2) 应用名
+          grep -q '挂机新落叶V5' engine/app/src/main/res/values/strings.xml
+          echo '  app_name: OK'
+          # 3) 联网权限必须是注释状态（行首 <uses-permission ... INTERNET 不允许存在）
+          if grep -Eq '^[[:space:]]*<uses-permission[^>]*INTERNET' engine/app/src/main/AndroidManifest.xml; then
+            echo '!! INTERNET permission still active'; exit 1
+          fi
+          echo '  no-internet: OK'
+          # 4) 只编 arm64
+          grep -q 'APP_ABI := arm64-v8a$' engine/app/jni/Application.mk
+          echo '  abi: OK'
+          echo 'PATCHES CONFIRMED'
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential cmake curl gpg xxd \
+            ruby-full autoconf automake libtool pkg-config bison flex \
+            python3 git unzip wget
+
+      - name: 安装 Ruby 3.1
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.1'
+
+      - name: 安装 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 安装 Android NDK
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: 导出 NDK 工具链路径
+        run: |
+          echo "ARCH=linux-x86_64" >> "$GITHUB_ENV"
+          echo "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+          echo "NDK=${ANDROID_NDK_HOME}"
+
+      - name: 下载引擎依赖（SDL2 / Ruby 3.1 / OpenSSL ...）
+        working-directory: engine/app/jni
+        run: |
+          chmod +x get_deps.sh
+          ./get_deps.sh
+          cd mkxp-z
+          chmod +x make_xxd.sh
+          ./make_xxd.sh
+
+      - name: 编译原生依赖 (arm64-v8a)
+        working-directory: engine/app/jni
+        run: |
+          HOST=aarch64-linux-android \
+          TARGET=aarch64-linux-android \
+          ABI=arm64-v8a \
+          LDFLAGS="-Wl,-z,max-page-size=16384" \
+          make -j"$(nproc)"
+
+      - name: 编译 APK
+        working-directory: engine
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug \
+            -Pandroid.suppressUnsupportedCompileSdk=34 \
+            --no-daemon \
+            --stacktrace
+
+      - name: 收集 APK
+        run: |
+          mkdir -p out
+          find engine/app/build/outputs/apk/debug -name '*.apk' -exec cp {} out/ \;
+          ls -lh out
+          sha256sum out/*.apk
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: luoye-v5-apk
+          path: out/*.apk
+          if-no-files-found: error
+          retention-days: 30
